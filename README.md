@@ -7,13 +7,18 @@ A small World of Warcraft TBC Anniversary addon that displays an internal cooldo
 - Sextant of Unstable Currents (item ID: `30626`)
   - Proc: Unstable Currents (spell ID: `38348`)
   - Internal cooldown: 45 seconds
+- Serpent-Coil Braid (item ID: `30720`)
+  - Trigger: consuming a Mage mana gem
+  - Cooldown: 2 minutes, matching the mana-gem cooldown
 
 ## Features
 
 - Automatically detects the trinket proc through the combat log.
-- Starts a 45-second internal cooldown when the proc buff is applied to the player.
-- Shows the Blizzard-style internal cooldown swipe directly on supported action-bar and TrinketMenu buttons.
+- Starts a 45-second internal cooldown when the Sextant proc buff is applied to the player.
+- Tracks Serpent-Coil Braid through the mana-gem use events and the shared cooldown on Mana Jade, Mana Agate, Mana Citrine, Mana Ruby, and Mana Emerald.
+- Shows the Blizzard-style internal cooldown swipe directly on supported action-bar, character equipment, and TrinketMenu buttons.
 - Adds the internal cooldown swipe and native countdown number to standard Blizzard action-bar buttons containing the supported trinket.
+- Adds the internal cooldown to the default character-sheet trinket slots.
 - Adds the internal cooldown to TrinketMenu's equipped-trinket buttons and bag menu entries when TrinketMenu is installed.
 - Uses Blizzard's native cooldown number display, following the **Show Numbers for Cooldowns** interface option.
 - Only displays timers for supported trinkets currently equipped.
@@ -35,10 +40,11 @@ A small World of Warcraft TBC Anniversary addon that displays an internal cooldo
 ## Usage
 
 1. Equip the Sextant of Unstable Currents.
-2. Place it directly on a standard Blizzard action bar, or use TrinketMenu.
-3. Trigger its spell-critical proc in combat.
-4. The internal cooldown swipe will appear on the matching action-bar or TrinketMenu button.
-5. To show the numeric countdown, enable **Show Numbers for Cooldowns** in the Blizzard interface options. The addon uses the same native cooldown text as action-bar and item cooldowns.
+2. Place it directly on a standard Blizzard action bar, open the character equipment screen, or use TrinketMenu.
+3. Trigger its spell-critical proc in combat, or consume a Mana Gem for Serpent-Coil Braid.
+4. The internal cooldown swipe will appear on the matching action-bar, character-sheet, or TrinketMenu button.
+5. For Serpent-Coil Braid, consume a Mana Gem while it is equipped; the tracker mirrors the gem's remaining two-minute cooldown.
+6. To show the numeric countdown, enable **Show Numbers for Cooldowns** in the Blizzard interface options. The addon uses the same native cooldown text as action-bar and item cooldowns.
 
 The internal cooldown starts when the **Unstable Currents** proc is applied, not when the 15-second buff expires.
 
@@ -69,6 +75,11 @@ local TRINKETS = {
         name = "Sextant of Unstable Currents",
         procSpellID = 38348,
         cooldown = 45,
+    },
+    [30720] = {
+        name = "Serpent-Coil Braid",
+        cooldown = 120,
+        trigger = "manaGem",
     },
     -- [12345] = {
     --     name = "Example trinket",

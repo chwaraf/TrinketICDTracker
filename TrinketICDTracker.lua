@@ -4,8 +4,9 @@
 -- To add another trinket, add an entry to TRINKETS below:
 -- [ITEM_ID] = {
 --     name = "Trinket name",
---     procSpellID = SPELL_ID_OF_THE_PROC_BUFF,
+--     procSpellID = SPELL_ID_OF_THE_PROC_BUFF, -- omit for non-spell triggers
 --     cooldown = INTERNAL_COOLDOWN_IN_SECONDS,
+--     trigger = "manaGem", -- optional special trigger
 -- }
 
 local ADDON_NAME = "TrinketICDTracker"
@@ -17,6 +18,36 @@ local TRINKETS = {
         procSpellID = 38348,
         cooldown = 45,
     },
+    [30720] = {
+        name = "Serpent-Coil Braid",
+        cooldown = 120,
+        trigger = "manaGem",
+    },
+}
+
+-- All TBC Mage mana gems share the same two-minute cooldown.
+local MANA_GEM_IDS = {
+    5513,  -- Mana Jade
+    5514,  -- Mana Agate
+    8007,  -- Mana Citrine
+    8008,  -- Mana Ruby
+    22044, -- Mana Emerald
+}
+
+-- The spell effects fired when the corresponding mana gems are consumed.
+-- These are separate from the Conjure Mana Gem spell IDs.
+local MANA_GEM_USE_SPELL_IDS = {
+    [5405] = true,  -- Mana Agate: Replenish Mana
+    [10052] = true, -- Mana Jade: Replenish Mana
+    [10057] = true, -- Mana Citrine: Replenish Mana
+    [10058] = true, -- Mana Ruby: Replenish Mana
+    [27103] = true, -- Mana Emerald: Replenish Mana
+    -- Some client builds report the item ID rather than the item-effect spell.
+    [5513] = true,
+    [5514] = true,
+    [8007] = true,
+    [8008] = true,
+    [22044] = true,
 }
 
 local DEFAULTS = {
@@ -37,7 +68,11 @@ local tracker = {
     initialized = false,
     playerGUID = nil,
     timers = {},
+    manaGemCooldowns = {},
     actionBarOverlays = {},
+    characterSlotOverlays = {},
+    characterSlotOverlayButtons = {},
+    characterFrameHooked = false,
     trinketMenuOverlays = {},
     trinketMenuOverlayButtons = {},
     trinketMenuHooked = false,
@@ -102,6 +137,77 @@ function tracker:GetEquippedSupportedItem()
         end
     end
     return nil, nil
+end
+
+function tracker:GetManaGemCooldown(itemID, now)
+    if not GetItemCooldown then
+        return nil, nil
+    end
+
+    local start, duration = GetItemCooldown(itemID)
+    if start and duration and duration > 0 and start + duration > now then
+        return start, duration
+    end
+
+    return nil, nil
+end
+
+function tracker:InitializeManaGemCooldowns()
+    self.manaGemCooldowns = {}
+    local now = GetTime()
+
+    for _, itemID in ipairs(MANA_GEM_IDS) do
+        local start, duration = self:GetManaGemCooldown(itemID, now)
+        self.manaGemCooldowns[itemID] = {
+            active = start ~= nil,
+            start = start,
+            duration = duration,
+        }
+    end
+end
+
+function tracker:SampleManaGemCooldowns()
+    local now = GetTime()
+
+    for _, itemID in ipairs(MANA_GEM_IDS) do
+        local start, duration = self:GetManaGemCooldown(itemID, now)
+        local active = start ~= nil
+        local previous = self.manaGemCooldowns[itemID]
+
+        -- The first sample establishes a baseline. A later inactive -> active
+        -- transition means that a mana gem was just consumed.
+        if previous and active and (not previous.active or previous.start ~= start) then
+            if self.db.enabled and self:IsItemEquipped(30720) then
+                self:StartCooldownAt(30720, TRINKETS[30720], start, duration)
+            end
+        end
+
+        self.manaGemCooldowns[itemID] = {
+            active = active,
+            start = start,
+            duration = duration,
+        }
+    end
+end
+
+function tracker:SyncSerpentCooldownFromManaGem()
+    if not self.db.enabled or not self:IsItemEquipped(30720) then
+        return
+    end
+
+    local timer = self.timers[30720]
+    local now = GetTime()
+    if timer and timer.endTime > now then
+        return
+    end
+
+    for _, itemID in ipairs(MANA_GEM_IDS) do
+        local start, duration = self:GetManaGemCooldown(itemID, now)
+        if start then
+            self:StartCooldownAt(30720, TRINKETS[30720], start, duration)
+            return
+        end
+    end
 end
 
 function tracker:GetActionButtonSlot(button)
@@ -216,6 +322,94 @@ function tracker:RefreshActionBarCooldowns()
             local entry = TRINKETS[itemID]
             for _, overlay in ipairs(self.actionBarOverlays) do
                 if self:IsActionButtonForItem(overlay.button, itemID) then
+                    if overlay.cooldown.SetHideCountdownNumbers then
+                        overlay.cooldown:SetHideCountdownNumbers(false)
+                    end
+                    if CooldownFrame_SetTimer then
+                        CooldownFrame_SetTimer(overlay.cooldown, timer.startTime, entry.cooldown, 1)
+                    else
+                        overlay.cooldown:SetCooldown(timer.startTime, entry.cooldown)
+                    end
+                    overlay.cooldown:Show()
+                end
+            end
+        end
+    end
+end
+
+function tracker:CreateCharacterSlotOverlays()
+    if not self.initialized then
+        return
+    end
+    if InCombatLockdown and InCombatLockdown() then
+        return
+    end
+
+    for index = 0, 1 do
+        local button = _G["CharacterTrinket" .. index .. "Slot"]
+        if button and not self.characterSlotOverlayButtons[button] then
+            local cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
+            cooldown:SetAllPoints(button)
+            cooldown:SetFrameLevel(button:GetFrameLevel() + 10)
+            if cooldown.SetHideCountdownNumbers then
+                cooldown:SetHideCountdownNumbers(false)
+            end
+            if cooldown.SetDrawSwipe then
+                cooldown:SetDrawSwipe(true)
+            end
+            if cooldown.SetDrawEdge then
+                cooldown:SetDrawEdge(true)
+            end
+            cooldown:Hide()
+
+            local overlay = {
+                button = button,
+                cooldown = cooldown,
+                index = index,
+            }
+            self.characterSlotOverlays[#self.characterSlotOverlays + 1] = overlay
+            self.characterSlotOverlayButtons[button] = overlay
+        end
+    end
+end
+
+function tracker:GetCharacterSlotItemID(overlay)
+    return GetInventoryItemID("player", 13 + overlay.index)
+end
+
+function tracker:HookCharacterFrame()
+    if self.characterFrameHooked or not CharacterFrame or not CharacterFrame.HookScript then
+        return
+    end
+
+    CharacterFrame:HookScript("OnShow", function()
+        tracker:CreateCharacterSlotOverlays()
+        tracker:RefreshCharacterSlotCooldowns()
+    end)
+    self.characterFrameHooked = true
+end
+
+function tracker:RefreshCharacterSlotCooldowns()
+    if not self.initialized then
+        return
+    end
+
+    self:CreateCharacterSlotOverlays()
+
+    for _, overlay in ipairs(self.characterSlotOverlays) do
+        overlay.cooldown:Hide()
+    end
+
+    if not self.db.enabled then
+        return
+    end
+
+    local now = GetTime()
+    for itemID, timer in pairs(self.timers) do
+        if timer.endTime > now then
+            local entry = TRINKETS[itemID]
+            for _, overlay in ipairs(self.characterSlotOverlays) do
+                if self:GetCharacterSlotItemID(overlay) == itemID then
                     if overlay.cooldown.SetHideCountdownNumbers then
                         overlay.cooldown:SetHideCountdownNumbers(false)
                     end
@@ -378,6 +572,7 @@ function tracker:RefreshVisibility()
     end
 
     self:RefreshActionBarCooldowns()
+    self:RefreshCharacterSlotCooldowns()
     self:RefreshTrinketMenuCooldowns()
 end
 
@@ -385,6 +580,9 @@ function tracker:UpdateTimers()
     if not self.initialized then
         return
     end
+
+    self:SampleManaGemCooldowns()
+    self:SyncSerpentCooldownFromManaGem()
 
     local now = GetTime()
     local changed = false
@@ -400,15 +598,51 @@ function tracker:UpdateTimers()
     end
 end
 
-function tracker:StartCooldown(itemID, entry)
+function tracker:StartCooldownAt(itemID, entry, startTime, duration)
     local now = GetTime()
+    duration = duration or entry.cooldown
+
+    if not startTime or startTime + duration <= now then
+        return
+    end
+
+    local existing = self.timers[itemID]
+    if existing and existing.endTime > now then
+        return
+    end
+
     self.timers[itemID] = {
-        startTime = now,
-        endTime = now + entry.cooldown,
+        startTime = startTime,
+        endTime = startTime + duration,
     }
 
-    self:Debug(entry.name .. " proc detected; started " .. tostring(entry.cooldown) .. " second cooldown")
+    self:Debug(entry.name .. " cooldown started; " .. tostring(math.ceil(startTime + duration - now)) .. " seconds remaining")
     self:RefreshVisibility()
+end
+
+function tracker:StartCooldown(itemID, entry)
+    self:StartCooldownAt(itemID, entry, GetTime(), entry.cooldown)
+end
+
+function tracker:HandleManaGemUse()
+    if self.db.enabled and self:IsItemEquipped(30720) then
+        self:StartCooldown(30720, TRINKETS[30720])
+    end
+end
+
+function tracker:HandleUnitSpellcast(event, unit, arg2, arg3, arg4, arg5)
+    if event ~= "UNIT_SPELLCAST_SUCCEEDED" or unit ~= "player" then
+        return
+    end
+
+    -- The payload differs slightly between Classic client revisions:
+    -- newer clients use (unit, castGUID, spellID), while older clients also
+    -- include spell name/rank/lineID before the numeric spell ID.
+    local spellID = tonumber(arg5) or tonumber(arg3) or tonumber(arg2)
+    if spellID and MANA_GEM_USE_SPELL_IDS[spellID] then
+        self:Debug("Mana gem use detected from spell " .. tostring(spellID))
+        self:HandleManaGemUse()
+    end
 end
 
 function tracker:HandleCombatLog(...)
@@ -447,6 +681,14 @@ function tracker:HandleCombatLog(...)
         ))
     end
 
+    if self.db.enabled
+        and subevent == "SPELL_CAST_SUCCESS"
+        and sourceGUID == self.playerGUID
+        and MANA_GEM_USE_SPELL_IDS[spellID] then
+        self:HandleManaGemUse()
+        return
+    end
+
     if not self.db.enabled or subevent ~= "SPELL_AURA_APPLIED" or destGUID ~= self.playerGUID then
         return
     end
@@ -480,21 +722,36 @@ function tracker:OnEvent(event, ...)
 
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         self.playerGUID = UnitGUID("player")
+        if not next(self.manaGemCooldowns) then
+            self:InitializeManaGemCooldowns()
+        end
         self:CreateActionBarOverlays()
+        self:CreateCharacterSlotOverlays()
         self:CreateTrinketMenuOverlays()
+        self:HookCharacterFrame()
         self:HookTrinketMenu()
         self:RefreshVisibility()
     elseif event == "PLAYER_REGEN_ENABLED" then
         self:CreateActionBarOverlays()
+        self:CreateCharacterSlotOverlays()
         self:CreateTrinketMenuOverlays()
         self:RefreshActionBarCooldowns()
+        self:RefreshCharacterSlotCooldowns()
         self:RefreshTrinketMenuCooldowns()
     elseif event == "PLAYER_EQUIPMENT_CHANGED" then
         self:CreateTrinketMenuOverlays()
+        self:SyncSerpentCooldownFromManaGem()
         self:RefreshVisibility()
     elseif event == "BAG_UPDATE" then
         self:CreateTrinketMenuOverlays()
         self:RefreshTrinketMenuCooldowns()
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        self:HandleUnitSpellcast(event, ...)
+    elseif event == "SPELL_UPDATE_COOLDOWN"
+        or event == "BAG_UPDATE_COOLDOWN"
+        or event == "ACTIONBAR_UPDATE_COOLDOWN" then
+        self:SampleManaGemCooldowns()
+        self:SyncSerpentCooldownFromManaGem()
     elseif event == "ACTIONBAR_SLOT_CHANGED"
         or event == "ACTIONBAR_PAGE_CHANGED"
         or event == "UPDATE_BONUS_ACTIONBAR" then
@@ -511,7 +768,7 @@ function tracker:PrintHelp()
     Print("/tic debug - toggle combat-log debug output")
     Print("/tic enable - enable the tracker")
     Print("/tic disable - disable the tracker")
-    Print("Supported: Sextant of Unstable Currents (30626)")
+    Print("Supported: Sextant of Unstable Currents (30626), Serpent-Coil Braid (30720)")
 end
 
 SLASH_TRINKETICDTRACKER1 = "/tic"
@@ -543,6 +800,10 @@ eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 eventFrame:RegisterEvent("BAG_UPDATE")
+eventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+eventFrame:RegisterEvent("BAG_UPDATE_COOLDOWN")
+eventFrame:RegisterEvent("ACTIONBAR_UPDATE_COOLDOWN")
 eventFrame:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
 eventFrame:RegisterEvent("ACTIONBAR_PAGE_CHANGED")
 eventFrame:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
