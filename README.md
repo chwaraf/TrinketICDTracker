@@ -12,12 +12,14 @@ A small World of Warcraft TBC Anniversary addon that displays an internal cooldo
 
 - Automatically detects the trinket proc through the combat log.
 - Starts a 45-second internal cooldown when the proc buff is applied to the player.
-- Shows the trinket icon and Blizzard-style cooldown swipe.
+- Shows the Blizzard-style internal cooldown swipe directly on supported action-bar and TrinketMenu buttons.
+- Adds the internal cooldown swipe and native countdown number to standard Blizzard action-bar buttons containing the supported trinket.
+- Adds the internal cooldown to TrinketMenu's equipped-trinket buttons and bag menu entries when TrinketMenu is installed.
 - Uses Blizzard's native cooldown number display, following the **Show Numbers for Cooldowns** interface option.
 - Only displays timers for supported trinkets currently equipped.
 - Keeps the timer state if the trinket is temporarily removed and shows the remaining time if it is re-equipped.
 - Easy to extend by adding entries to the `TRINKETS` table in `TrinketICDTracker.lua`.
-- Saves the display position and settings between sessions.
+- Saves the enabled/debug settings between sessions.
 
 ## Installation
 
@@ -33,10 +35,10 @@ A small World of Warcraft TBC Anniversary addon that displays an internal cooldo
 ## Usage
 
 1. Equip the Sextant of Unstable Currents.
-2. Trigger its spell-critical proc in combat.
-3. The Sextant icon and cooldown swipe will appear at the center of the screen by default.
-4. To show the numeric countdown, enable **Show Numbers for Cooldowns** in the Blizzard interface options. The addon uses the same native cooldown text as action-bar and item cooldowns.
-5. Drag the icon to move it. Use `/tic lock` to prevent accidental movement.
+2. Place it directly on a standard Blizzard action bar, or use TrinketMenu.
+3. Trigger its spell-critical proc in combat.
+4. The internal cooldown swipe will appear on the matching action-bar or TrinketMenu button.
+5. To show the numeric countdown, enable **Show Numbers for Cooldowns** in the Blizzard interface options. The addon uses the same native cooldown text as action-bar and item cooldowns.
 
 The internal cooldown starts when the **Unstable Currents** proc is applied, not when the 15-second buff expires.
 
@@ -44,9 +46,6 @@ The internal cooldown starts when the **Unstable Currents** proc is applied, not
 
 - `/tic help` — show available commands.
 - `/tic debug` — toggle combat-log debug output. This is useful for checking whether the proc event is being received.
-- `/tic lock` — lock the tracker position.
-- `/tic unlock` — allow the tracker to be dragged.
-- `/tic reset` — reset the tracker position.
 - `/tic enable` — enable the tracker.
 - `/tic disable` — disable the tracker.
 

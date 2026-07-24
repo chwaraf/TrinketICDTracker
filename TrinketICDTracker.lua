@@ -9,8 +9,6 @@
 -- }
 
 local ADDON_NAME = "TrinketICDTracker"
-local FRAME_NAME = "TrinketICDTrackerFrame"
-
 -- Supported trinkets.
 -- Sextant of Unstable Currents applies Unstable Currents (spell ID 38348).
 local TRINKETS = {
@@ -22,18 +20,27 @@ local TRINKETS = {
 }
 
 local DEFAULTS = {
-    x = 0,
-    y = -140,
-    locked = false,
     enabled = true,
     debug = false,
+}
+
+-- Standard Blizzard action-bar button groups in TBC Classic.
+local ACTIONBAR_GROUPS = {
+    "Action",
+    "MultiBarBottomLeft",
+    "MultiBarBottomRight",
+    "MultiBarRight",
+    "MultiBarLeft",
 }
 
 local tracker = {
     initialized = false,
     playerGUID = nil,
     timers = {},
-    frames = {},
+    actionBarOverlays = {},
+    trinketMenuOverlays = {},
+    trinketMenuOverlayButtons = {},
+    trinketMenuHooked = false,
 }
 
 local function Print(message)
@@ -63,19 +70,6 @@ function tracker:EnsureDatabase()
         if self.db[key] == nil then
             self.db[key] = value
         end
-    end
-end
-
-function tracker:PlaceRoot()
-    self.root:ClearAllPoints()
-    self.root:SetPoint("CENTER", UIParent, "CENTER", self.db.x, self.db.y)
-end
-
-function tracker:SaveRootPosition()
-    local _, _, _, x, y = self.root:GetPoint(1)
-    if x and y then
-        self.db.x = x
-        self.db.y = y
     end
 end
 
@@ -110,93 +104,270 @@ function tracker:GetEquippedSupportedItem()
     return nil, nil
 end
 
-function tracker:CreateItemFrame(itemID, entry)
-    local frame = CreateFrame("Frame", nil, self.root)
-    frame:SetSize(48, 48)
-    frame:SetFrameStrata("MEDIUM")
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-
-    frame.icon = frame:CreateTexture(nil, "BACKGROUND")
-    frame.icon:SetAllPoints(frame)
-    frame.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-
-    frame.border = frame:CreateTexture(nil, "OVERLAY")
-    frame.border:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
-    frame.border:SetBlendMode("ADD")
-    frame.border:SetAllPoints(frame)
-
-    frame.cooldown = CreateFrame("Cooldown", nil, frame, "CooldownFrameTemplate")
-    frame.cooldown:SetAllPoints(frame)
-
-    -- Allow Blizzard's native cooldown countdown text to be used. The global
-    -- countdownForCooldowns CVar, controlled by the "Show Numbers for
-    -- Cooldowns" option, decides whether the number is actually visible.
-    if frame.cooldown.SetHideCountdownNumbers then
-        frame.cooldown:SetHideCountdownNumbers(false)
-    end
-    if frame.cooldown.SetDrawSwipe then
-        frame.cooldown:SetDrawSwipe(true)
-    end
-    if frame.cooldown.SetDrawEdge then
-        frame.cooldown:SetDrawEdge(true)
+function tracker:GetActionButtonSlot(button)
+    if not button then
+        return nil
     end
 
-    frame:SetScript("OnDragStart", function()
-        if not tracker.db.locked then
-            tracker.root:StartMoving()
-        end
-    end)
-
-    frame:SetScript("OnDragStop", function()
-        tracker.root:StopMovingOrSizing()
-        tracker:SaveRootPosition()
-    end)
-
-    frame:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        if GameTooltip.SetHyperlink then
-            GameTooltip:SetHyperlink("item:" .. itemID)
-        else
-            GameTooltip:SetText(entry.name)
-        end
-        GameTooltip:AddLine("Internal cooldown: " .. tostring(entry.cooldown) .. " sec", 1, 1, 1)
-        GameTooltip:Show()
-    end)
-
-    frame:SetScript("OnLeave", function()
-        GameTooltip:Hide()
-    end)
-
-    frame:SetScript("OnUpdate", function(self)
-        local timer = tracker.timers[itemID]
-        if not timer then
-            return
-        end
-
-        local remaining = timer.endTime - GetTime()
-        if remaining <= 0 then
-            tracker.timers[itemID] = nil
-            self.cooldown:SetCooldown(0, 0)
-            tracker:RefreshVisibility()
-            return
-        end
-    end)
-
-    local icon = entry.icon
-    if not icon then
-        icon = GetItemIcon(itemID)
+    -- TBC Classic's standard action buttons expose their current action slot
+    -- through the action field and ActionButton_GetPagedID().
+    if button.action then
+        return button.action
     end
-    frame.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+    if ActionButton_GetPagedID then
+        return ActionButton_GetPagedID(button)
+    end
+    if ActionButton_CalculateAction then
+        return ActionButton_CalculateAction(button)
+    end
+    if button.GetAttribute then
+        return button:GetAttribute("action")
+    end
 
-    self.frames[itemID] = frame
-    return frame
+    return nil
 end
 
-function tracker:CreateFrames()
-    for itemID, entry in pairs(TRINKETS) do
-        if not self.frames[itemID] then
-            self:CreateItemFrame(itemID, entry)
+function tracker:CollectActionButtons()
+    local buttons = {}
+    local seen = {}
+
+    local function AddButton(button)
+        if button and not seen[button] then
+            seen[button] = true
+            buttons[#buttons + 1] = button
+        end
+    end
+
+    for _, groupName in ipairs(ACTIONBAR_GROUPS) do
+        for index = 1, 12 do
+            AddButton(_G[groupName .. "Button" .. index])
+        end
+    end
+
+    -- Some Classic UI builds expose the same buttons through this registry.
+    -- Include it as a fallback without requiring it to exist.
+    if ActionBarButtonEventsFrame and ActionBarButtonEventsFrame.frames then
+        for _, button in pairs(ActionBarButtonEventsFrame.frames) do
+            AddButton(button)
+        end
+    end
+
+    return buttons
+end
+
+function tracker:CreateActionBarOverlays()
+    if not self.initialized or #self.actionBarOverlays > 0 then
+        return
+    end
+    if InCombatLockdown and InCombatLockdown() then
+        return
+    end
+
+    for _, button in ipairs(self:CollectActionButtons()) do
+        local cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
+        cooldown:SetAllPoints(button)
+        cooldown:SetFrameLevel(button:GetFrameLevel() + 10)
+        if cooldown.SetHideCountdownNumbers then
+            cooldown:SetHideCountdownNumbers(false)
+        end
+        if cooldown.SetDrawSwipe then
+            cooldown:SetDrawSwipe(true)
+        end
+        if cooldown.SetDrawEdge then
+            cooldown:SetDrawEdge(true)
+        end
+        cooldown:Hide()
+
+        self.actionBarOverlays[#self.actionBarOverlays + 1] = {
+            button = button,
+            cooldown = cooldown,
+        }
+    end
+
+    self:Debug("Created " .. tostring(#self.actionBarOverlays) .. " action-bar cooldown overlays")
+end
+
+function tracker:IsActionButtonForItem(button, itemID)
+    local actionSlot = self:GetActionButtonSlot(button)
+    if not actionSlot then
+        return false
+    end
+
+    local actionType, actionID = GetActionInfo(actionSlot)
+    return actionType == "item" and tonumber(actionID) == tonumber(itemID)
+end
+
+function tracker:RefreshActionBarCooldowns()
+    if not self.initialized then
+        return
+    end
+
+    for _, overlay in ipairs(self.actionBarOverlays) do
+        overlay.cooldown:Hide()
+    end
+
+    if not self.db.enabled then
+        return
+    end
+
+    local now = GetTime()
+    for itemID, timer in pairs(self.timers) do
+        if timer.endTime > now and self:IsItemEquipped(itemID) then
+            local entry = TRINKETS[itemID]
+            for _, overlay in ipairs(self.actionBarOverlays) do
+                if self:IsActionButtonForItem(overlay.button, itemID) then
+                    if overlay.cooldown.SetHideCountdownNumbers then
+                        overlay.cooldown:SetHideCountdownNumbers(false)
+                    end
+                    if CooldownFrame_SetTimer then
+                        CooldownFrame_SetTimer(overlay.cooldown, timer.startTime, entry.cooldown, 1)
+                    else
+                        overlay.cooldown:SetCooldown(timer.startTime, entry.cooldown)
+                    end
+                    overlay.cooldown:Show()
+                end
+            end
+        end
+    end
+end
+
+function tracker:CreateTrinketMenuOverlays()
+    if not self.initialized then
+        return
+    end
+    if InCombatLockdown and InCombatLockdown() then
+        return
+    end
+
+    -- TrinketMenu creates these buttons even when its windows are hidden. We
+    -- attach a separate cooldown frame so TrinketMenu's normal item cooldown
+    -- refreshes cannot overwrite the internal cooldown.
+    for index = 0, 1 do
+        local button = _G["TrinketMenu_Trinket" .. index]
+        if button and not self.trinketMenuOverlayButtons[button] then
+            local cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
+            cooldown:SetAllPoints(button)
+            cooldown:SetFrameLevel(button:GetFrameLevel() + 10)
+            if cooldown.SetHideCountdownNumbers then
+                cooldown:SetHideCountdownNumbers(false)
+            end
+            if cooldown.SetDrawSwipe then
+                cooldown:SetDrawSwipe(true)
+            end
+            if cooldown.SetDrawEdge then
+                cooldown:SetDrawEdge(true)
+            end
+            cooldown:Hide()
+
+            local overlay = {
+                button = button,
+                cooldown = cooldown,
+                kind = "worn",
+                index = index,
+            }
+            self.trinketMenuOverlays[#self.trinketMenuOverlays + 1] = overlay
+            self.trinketMenuOverlayButtons[button] = overlay
+        end
+    end
+
+    for index = 1, 30 do
+        local button = _G["TrinketMenu_Menu" .. index]
+        if button and not self.trinketMenuOverlayButtons[button] then
+            local cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
+            cooldown:SetAllPoints(button)
+            cooldown:SetFrameLevel(button:GetFrameLevel() + 10)
+            if cooldown.SetHideCountdownNumbers then
+                cooldown:SetHideCountdownNumbers(false)
+            end
+            if cooldown.SetDrawSwipe then
+                cooldown:SetDrawSwipe(true)
+            end
+            if cooldown.SetDrawEdge then
+                cooldown:SetDrawEdge(true)
+            end
+            cooldown:Hide()
+
+            local overlay = {
+                button = button,
+                cooldown = cooldown,
+                kind = "menu",
+                index = index,
+            }
+            self.trinketMenuOverlays[#self.trinketMenuOverlays + 1] = overlay
+            self.trinketMenuOverlayButtons[button] = overlay
+        end
+    end
+
+    if #self.trinketMenuOverlays > 0 then
+        self:Debug("Created " .. tostring(#self.trinketMenuOverlays) .. " TrinketMenu cooldown overlays")
+    end
+end
+
+function tracker:HookTrinketMenu()
+    if self.trinketMenuHooked or not TrinketMenu or not TrinketMenu.BuildMenu or not hooksecurefunc then
+        return
+    end
+
+    hooksecurefunc(TrinketMenu, "BuildMenu", function()
+        tracker:CreateTrinketMenuOverlays()
+        tracker:RefreshTrinketMenuCooldowns()
+    end)
+    self.trinketMenuHooked = true
+end
+
+function tracker:GetTrinketMenuItemID(overlay)
+    if overlay.kind == "worn" then
+        local slot = 13 + overlay.index
+        local itemID = GetInventoryItemID("player", slot)
+        if not itemID then
+            local link = GetInventoryItemLink("player", slot)
+            if link then
+                itemID = tonumber(link:match("item:(%d+)"))
+            end
+        end
+        return itemID
+    end
+
+    if TrinketMenu and TrinketMenu.BaggedTrinkets then
+        local item = TrinketMenu.BaggedTrinkets[overlay.index]
+        return item and tonumber(item.id)
+    end
+
+    return nil
+end
+
+function tracker:RefreshTrinketMenuCooldowns()
+    if not self.initialized then
+        return
+    end
+
+    self:CreateTrinketMenuOverlays()
+
+    for _, overlay in ipairs(self.trinketMenuOverlays) do
+        overlay.cooldown:Hide()
+    end
+
+    if not self.db.enabled then
+        return
+    end
+
+    local now = GetTime()
+    for itemID, timer in pairs(self.timers) do
+        if timer.endTime > now then
+            local entry = TRINKETS[itemID]
+            for _, overlay in ipairs(self.trinketMenuOverlays) do
+                if self:GetTrinketMenuItemID(overlay) == itemID then
+                    if overlay.cooldown.SetHideCountdownNumbers then
+                        overlay.cooldown:SetHideCountdownNumbers(false)
+                    end
+                    if CooldownFrame_SetTimer then
+                        CooldownFrame_SetTimer(overlay.cooldown, timer.startTime, entry.cooldown, 1)
+                    else
+                        overlay.cooldown:SetCooldown(timer.startTime, entry.cooldown)
+                    end
+                    overlay.cooldown:Show()
+                end
+            end
         end
     end
 end
@@ -206,66 +377,35 @@ function tracker:RefreshVisibility()
         return
     end
 
-    local visible = {}
-    local now = GetTime()
+    self:RefreshActionBarCooldowns()
+    self:RefreshTrinketMenuCooldowns()
+end
 
-    for itemID, frame in pairs(self.frames) do
-        local timer = self.timers[itemID]
-        local show = self.db.enabled and timer and timer.endTime > now and self:IsItemEquipped(itemID)
-
-        if timer and timer.endTime <= now then
-            self.timers[itemID] = nil
-            timer = nil
-        end
-
-        if show then
-            visible[#visible + 1] = itemID
-            frame:Show()
-        else
-            frame:Hide()
-        end
-    end
-
-    table.sort(visible)
-
-    if #visible == 0 then
-        self.root:Hide()
+function tracker:UpdateTimers()
+    if not self.initialized then
         return
     end
 
-    self.root:SetHeight(48 + ((#visible - 1) * 52))
-    self.root:Show()
+    local now = GetTime()
+    local changed = false
+    for itemID, timer in pairs(self.timers) do
+        if timer.endTime <= now then
+            self.timers[itemID] = nil
+            changed = true
+        end
+    end
 
-    for index, itemID in ipairs(visible) do
-        local frame = self.frames[itemID]
-        frame:ClearAllPoints()
-        frame:SetPoint("TOP", self.root, "TOP", 0, -((index - 1) * 52))
+    if changed then
+        self:RefreshVisibility()
     end
 end
 
 function tracker:StartCooldown(itemID, entry)
     local now = GetTime()
-    local timer = {
+    self.timers[itemID] = {
         startTime = now,
         endTime = now + entry.cooldown,
     }
-
-    self.timers[itemID] = timer
-    local frame = self.frames[itemID]
-    if frame then
-        -- Use the same Blizzard cooldown path used by action-bar and item
-        -- buttons. SetHideCountdownNumbers(false) opts this frame into the
-        -- native number display; the global "Show Numbers for Cooldowns"
-        -- option still controls whether the number is visible.
-        if frame.cooldown.SetHideCountdownNumbers then
-            frame.cooldown:SetHideCountdownNumbers(false)
-        end
-        if CooldownFrame_SetTimer then
-            CooldownFrame_SetTimer(frame.cooldown, timer.startTime, entry.cooldown, 1)
-        else
-            frame.cooldown:SetCooldown(timer.startTime, entry.cooldown)
-        end
-    end
 
     self:Debug(entry.name .. " proc detected; started " .. tostring(entry.cooldown) .. " second cooldown")
     self:RefreshVisibility()
@@ -322,20 +462,15 @@ end
 function tracker:OnEvent(event, ...)
     if event == "ADDON_LOADED" then
         local loadedName = ...
-        if loadedName ~= ADDON_NAME then
-            return
+        if loadedName == ADDON_NAME then
+            self:EnsureDatabase()
+            self.initialized = true
+            self:RefreshVisibility()
+        elseif (loadedName == "TrinketMenu" or loadedName == "TrinketMenuClassic") and self.initialized then
+            self:CreateTrinketMenuOverlays()
+            self:HookTrinketMenu()
+            self:RefreshTrinketMenuCooldowns()
         end
-
-        self:EnsureDatabase()
-        self.root = CreateFrame("Frame", FRAME_NAME, UIParent)
-        self.root:SetSize(48, 48)
-        self.root:SetMovable(true)
-        self.root:SetClampedToScreen(true)
-        self.root:SetFrameStrata("MEDIUM")
-        self:PlaceRoot()
-        self:CreateFrames()
-        self.initialized = true
-        self:RefreshVisibility()
         return
     end
 
@@ -345,28 +480,37 @@ function tracker:OnEvent(event, ...)
 
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         self.playerGUID = UnitGUID("player")
+        self:CreateActionBarOverlays()
+        self:CreateTrinketMenuOverlays()
+        self:HookTrinketMenu()
         self:RefreshVisibility()
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        self:CreateActionBarOverlays()
+        self:CreateTrinketMenuOverlays()
+        self:RefreshActionBarCooldowns()
+        self:RefreshTrinketMenuCooldowns()
     elseif event == "PLAYER_EQUIPMENT_CHANGED" then
+        self:CreateTrinketMenuOverlays()
         self:RefreshVisibility()
+    elseif event == "BAG_UPDATE" then
+        self:CreateTrinketMenuOverlays()
+        self:RefreshTrinketMenuCooldowns()
+    elseif event == "ACTIONBAR_SLOT_CHANGED"
+        or event == "ACTIONBAR_PAGE_CHANGED"
+        or event == "UPDATE_BONUS_ACTIONBAR" then
+        self:CreateActionBarOverlays()
+        self:RefreshActionBarCooldowns()
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
         self:HandleCombatLog(...)
     end
-end
-
-function tracker:ResetPosition()
-    self.db.x = DEFAULTS.x
-    self.db.y = DEFAULTS.y
-    self:PlaceRoot()
-    Print("Position reset.")
 end
 
 function tracker:PrintHelp()
     Print("Commands:")
     Print("/tic help - show this help")
     Print("/tic debug - toggle combat-log debug output")
-    Print("/tic lock - lock the tracker position")
-    Print("/tic unlock - allow the tracker to be dragged")
-    Print("/tic reset - reset the tracker position")
+    Print("/tic enable - enable the tracker")
+    Print("/tic disable - disable the tracker")
     Print("Supported: Sextant of Unstable Currents (30626)")
 end
 
@@ -379,14 +523,6 @@ SlashCmdList.TRINKETICDTRACKER = function(message)
     elseif command == "debug" then
         tracker.db.debug = not tracker.db.debug
         Print("Debug output " .. (tracker.db.debug and "enabled" or "disabled") .. ".")
-    elseif command == "lock" then
-        tracker.db.locked = true
-        Print("Tracker locked.")
-    elseif command == "unlock" then
-        tracker.db.locked = false
-        Print("Tracker unlocked; drag the icon to move it.")
-    elseif command == "reset" then
-        tracker:ResetPosition()
     elseif command == "enable" then
         tracker.db.enabled = true
         tracker:RefreshVisibility()
@@ -404,8 +540,20 @@ local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+eventFrame:RegisterEvent("BAG_UPDATE")
+eventFrame:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+eventFrame:RegisterEvent("ACTIONBAR_PAGE_CHANGED")
+eventFrame:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
 eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 eventFrame:SetScript("OnEvent", function(_, event, ...)
     tracker:OnEvent(event, ...)
+end)
+eventFrame:SetScript("OnUpdate", function(_, elapsed)
+    tracker.updateElapsed = (tracker.updateElapsed or 0) + elapsed
+    if tracker.updateElapsed >= 0.1 then
+        tracker.updateElapsed = 0
+        tracker:UpdateTimers()
+    end
 end)
