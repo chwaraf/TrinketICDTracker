@@ -299,8 +299,53 @@ function tracker:IsActionButtonForItem(button, itemID)
         return false
     end
 
-    local actionType, actionID = GetActionInfo(actionSlot)
-    return actionType == "item" and tonumber(actionID) == tonumber(itemID)
+    local actionType, id = GetActionInfo(actionSlot)
+    if actionType == "item" then
+        return tonumber(id) == tonumber(itemID)
+    elseif actionType == "macro" then
+        -- 1. Check if the macro specifically shows this item (e.g. #showtooltip).
+        local showItem = GetMacroItem(id)
+        if showItem then
+            if showItem:find("item:") then
+                if tonumber(showItem:match("item:(%d+)")) == itemID then return true end
+            elseif tonumber(showItem) == itemID then
+                return true
+            else
+                local _, link = GetItemInfo(showItem)
+                if link then
+                    if tonumber(link:match("item:(%d+)")) == itemID then return true end
+                end
+                local targetName = GetItemInfo(itemID)
+                if targetName and showItem == targetName then return true end
+            end
+        end
+
+        -- 2. Check the macro body for references to the item or its equipped slot.
+        local _, _, body = GetMacroInfo(id)
+        if body then
+            -- Search for item ID or name.
+            if body:find("item:" .. itemID) then
+                return true
+            end
+            
+            local itemName = GetItemInfo(itemID)
+            if itemName and body:lower():find(itemName:lower(), 1, true) then
+                return true
+            end
+
+            -- Check if the macro uses the slot where this item is currently equipped.
+            for _, slot in ipairs({13, 14}) do
+                if GetInventoryItemID("player", slot) == itemID then
+                    -- Match /use 13 or /cast 13 (with frontier pattern to avoid 130 etc).
+                    if body:find("/use%s+" .. slot .. "%f[%D]") or body:find("/cast%s+" .. slot .. "%f[%D]") then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+
+    return false
 end
 
 function tracker:RefreshActionBarCooldowns()
@@ -754,7 +799,8 @@ function tracker:OnEvent(event, ...)
         self:SyncSerpentCooldownFromManaGem()
     elseif event == "ACTIONBAR_SLOT_CHANGED"
         or event == "ACTIONBAR_PAGE_CHANGED"
-        or event == "UPDATE_BONUS_ACTIONBAR" then
+        or event == "UPDATE_BONUS_ACTIONBAR"
+        or event == "UPDATE_MACROS" then
         self:CreateActionBarOverlays()
         self:RefreshActionBarCooldowns()
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
@@ -807,6 +853,7 @@ eventFrame:RegisterEvent("ACTIONBAR_UPDATE_COOLDOWN")
 eventFrame:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
 eventFrame:RegisterEvent("ACTIONBAR_PAGE_CHANGED")
 eventFrame:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
+eventFrame:RegisterEvent("UPDATE_MACROS")
 eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 eventFrame:SetScript("OnEvent", function(_, event, ...)
     tracker:OnEvent(event, ...)

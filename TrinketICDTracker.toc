@@ -2,7 +2,7 @@
 ## Title: Trinket ICD Tracker
 ## Notes: Displays internal cooldowns for supported trinket procs.
 ## Author: Arena.ai
-## Version: 1.7.0
+## Version: 1.8.0
 ## SavedVariables: TrinketICDTrackerDB
 
 TrinketICDTracker.lua
