@@ -10,8 +10,7 @@ $RECYCLE.BIN/
 .Trashes
 
 # --- Editors / IDEs ---
-.vscode/*
-!.vscode/settings.json
+.vscode/
 .idea/
 *.swp
 *.swo
