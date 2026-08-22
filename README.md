@@ -7,6 +7,15 @@ A small World of Warcraft TBC Anniversary addon that displays an internal cooldo
 - Sextant of Unstable Currents (item ID: `30626`)
   - Proc: Unstable Currents (spell ID: `38348`)
   - Internal cooldown: 45 seconds
+- Shiffar's Nexus-Horn (item ID: `28418`)
+  - Proc: Call of the Nexus (spell ID: `34320`), matched by name as a fallback
+  - Internal cooldown: 45 seconds
+- Quagmirran's Eye (item ID: `27683`)
+  - Proc: Spell Haste (spell ID: `33370`)
+  - Internal cooldown: 45 seconds
+- Scarab of the Infinite Cycle (item ID: `28190`)
+  - Proc: Spell Haste (spell IDs: `33370`, `44605`)
+  - Internal cooldown: 45 seconds
 - Serpent-Coil Braid (item ID: `30720`)
   - Trigger: consuming a Mage mana gem
   - Cooldown: 2 minutes, matching the mana-gem cooldown

@@ -4,20 +4,57 @@
 -- To add another trinket, add an entry to TRINKETS below:
 -- [ITEM_ID] = {
 --     name = "Trinket name",
---     procSpellID = SPELL_ID_OF_THE_PROC_BUFF, -- omit for non-spell triggers
+--     procSpellID = SPELL_ID_OF_THE_PROC_BUFF, -- single ID or table of IDs
+--     procSpellName = "Buff name", -- fallback when the buff ID is unreliable
 --     cooldown = INTERNAL_COOLDOWN_IN_SECONDS,
 --     trigger = "manaGem", -- optional special trigger
 -- }
 
 local ADDON_NAME = "TrinketICDTracker"
 -- Supported trinkets.
--- Sextant of Unstable Currents applies Unstable Currents (spell ID 38348).
+-- Aura-proc trinkets are detected via SPELL_AURA_APPLIED matching procSpellID
+-- (a single ID or a table of candidate IDs).
 local TRINKETS = {
+    -- Casters: aura procs -------------------------------------------------
     [30626] = {
         name = "Sextant of Unstable Currents",
         procSpellID = 38348,
         cooldown = 45,
     },
+    -- Shiffar's applies Call of the Nexus (visible buff spell ID 34320 -> 34321);
+    -- 20% chance on spell critical hit, +225 spell damage/healing for 10 sec,
+    -- 45 sec ICD. Note: 34320 is the hidden item-effect aura that never shows
+    -- up as SPELL_AURA_APPLIED; 34321 is the visible buff the player receives.
+    -- The name match acts as a fallback in case the client uses a different
+    -- aura ID than the published item-effect spell.
+    [28418] = {
+        name = "Shiffar's Nexus-Horn",
+        procSpellID = { 34321, 34320 },
+        procSpellName = "Call of the Nexus",
+        cooldown = 45,
+    },
+    -- Quagmirran's Eye: 10% chance on harmful spells, +320 spell haste rating
+    -- for 6 sec, 45 sec ICD. Its item-effect aura is 33297 ("Spell Haste
+    -- Trinket"); 33370 is the generic visible "Spell Haste" buff.
+    [27683] = {
+        name = "Quagmirran's Eye",
+        procSpellID = { 33297, 33370 },
+        procSpellName = "Spell Haste",
+        cooldown = 45,
+    },
+    -- Healer twin of Quagmirran's Eye: 10% chance on direct healing and HoT
+    -- spells, +320 spell haste rating for 6 sec, 45 sec ICD. Its item-effect
+    -- aura is 33953 ("Spell Haste Healer Trinket"); it shares the visible
+    -- "Spell Haste" buff (33370) with Quagmirran's Eye (they refresh rather
+    -- than stack). Beware look-alikes: spell ID 44605 is also named "Spell
+    -- Haste" but is the Sunblade Magister buff from Magisters' Terrace.
+    [28190] = {
+        name = "Scarab of the Infinite Cycle",
+        procSpellID = { 33953, 33370 },
+        procSpellName = "Spell Haste",
+        cooldown = 45,
+    },
+
     [30720] = {
         name = "Serpent-Coil Braid",
         cooldown = 120,
@@ -50,6 +87,24 @@ local MANA_GEM_USE_SPELL_IDS = {
     [22044] = true,
 }
 
+-- Proc spell IDs claimed by more than one trinket (e.g. the generic
+-- "Spell Haste" buff 33370 shared by Quagmirran's Eye and Scarab of the
+-- Infinite Cycle). A match on such an ID cannot tell which trinket actually
+-- procced, so the combat-log handler picks a single owner deterministically
+-- instead of starting cooldowns for both.
+local SHARED_PROC_IDS = {}
+for _, entry in pairs(TRINKETS) do
+    local ids = entry.procSpellID
+    if ids then
+        if type(ids) ~= "table" then
+            ids = { ids }
+        end
+        for _, id in ipairs(ids) do
+            SHARED_PROC_IDS[id] = (SHARED_PROC_IDS[id] or 0) + 1
+        end
+    end
+end
+
 local DEFAULTS = {
     enabled = true,
     debug = false,
@@ -68,6 +123,7 @@ local tracker = {
     initialized = false,
     playerGUID = nil,
     timers = {},
+    lastProcStarts = {},
     manaGemCooldowns = {},
     actionBarOverlays = {},
     characterSlotOverlays = {},
@@ -128,15 +184,6 @@ function tracker:IsItemEquipped(itemID)
     end
 
     return false
-end
-
-function tracker:GetEquippedSupportedItem()
-    for itemID, entry in pairs(TRINKETS) do
-        if self:IsItemEquipped(itemID) then
-            return itemID, entry
-        end
-    end
-    return nil, nil
 end
 
 function tracker:GetManaGemCooldown(itemID, now)
@@ -660,6 +707,7 @@ function tracker:StartCooldownAt(itemID, entry, startTime, duration)
         startTime = startTime,
         endTime = startTime + duration,
     }
+    self.lastProcStarts[itemID] = startTime
 
     self:Debug(entry.name .. " cooldown started; " .. tostring(math.ceil(startTime + duration - now)) .. " seconds remaining")
     self:RefreshVisibility()
@@ -688,6 +736,69 @@ function tracker:HandleUnitSpellcast(event, unit, arg2, arg3, arg4, arg5)
         self:Debug("Mana gem use detected from spell " .. tostring(spellID))
         self:HandleManaGemUse()
     end
+end
+
+-- Tests whether a combat-log aura belongs to a trinket entry. Returns
+-- matched=true, plus uniqueID=true when the match came from a proc spell ID
+-- that belongs to this trinket alone (not shared with any other trinket).
+function tracker:MatchProcEntry(entry, spellID, spellName)
+    local procIDs = entry.procSpellID
+    if procIDs then
+        if type(procIDs) ~= "table" then
+            procIDs = { procIDs }
+        end
+
+        local matched = false
+        local uniqueID = false
+        for _, procID in ipairs(procIDs) do
+            if spellID == procID then
+                matched = true
+                if (SHARED_PROC_IDS[procID] or 0) <= 1 then
+                    uniqueID = true
+                    break
+                end
+            end
+        end
+
+        if matched then
+            return true, uniqueID
+        end
+    end
+
+    if entry.procSpellName and spellName and spellName == entry.procSpellName then
+        return true, false
+    end
+
+    return false, false
+end
+
+-- Chooses which trinket owns a proc when several claim the same buff.
+-- Preference order: a unique-ID match wins, then the trinket whose internal
+-- cooldown started longest ago ("most rested", rotating fairly between
+-- shared-buff twins), then the lowest item ID as a stable tie-break.
+function tracker:PickCooldownOwner(matches)
+    if #matches == 0 then
+        return nil
+    end
+    if #matches == 1 then
+        return matches[1]
+    end
+
+    table.sort(matches, function(a, b)
+        if a.uniqueID ~= b.uniqueID then
+            return a.uniqueID
+        end
+
+        local aLast = self.lastProcStarts[a.itemID] or 0
+        local bLast = self.lastProcStarts[b.itemID] or 0
+        if aLast ~= bLast then
+            return aLast < bLast
+        end
+
+        return a.itemID < b.itemID
+    end)
+
+    return matches[1]
 end
 
 function tracker:HandleCombatLog(...)
@@ -738,11 +849,25 @@ function tracker:HandleCombatLog(...)
         return
     end
 
+    -- Collect every equipped trinket claiming this aura, then let
+    -- PickCooldownOwner resolve shared buffs (e.g. "Spell Haste" 33370 from
+    -- both Quagmirran's Eye and Scarab of the Infinite Cycle) to exactly one
+    -- owner, so a single proc never starts two cooldowns at once.
+    local matches = {}
     for itemID, entry in pairs(TRINKETS) do
-        if spellID == entry.procSpellID and self:IsItemEquipped(itemID) then
-            self:StartCooldown(itemID, entry)
-            return
+        local matched, uniqueID = self:MatchProcEntry(entry, spellID, spellName)
+        if matched and self:IsItemEquipped(itemID) then
+            matches[#matches + 1] = {
+                itemID = itemID,
+                entry = entry,
+                uniqueID = uniqueID,
+            }
         end
+    end
+
+    local chosen = self:PickCooldownOwner(matches)
+    if chosen then
+        self:StartCooldown(chosen.itemID, chosen.entry)
     end
 end
 
@@ -814,7 +939,9 @@ function tracker:PrintHelp()
     Print("/tic debug - toggle combat-log debug output")
     Print("/tic enable - enable the tracker")
     Print("/tic disable - disable the tracker")
-    Print("Supported: Sextant of Unstable Currents (30626), Serpent-Coil Braid (30720)")
+    Print("Supported: Sextant of Unstable Currents (30626), Serpent-Coil Braid (30720),")
+    Print("Shiffar's Nexus-Horn (28418), Quagmirran's Eye (27683),")
+    Print("Scarab of the Infinite Cycle (28190)")
 end
 
 SLASH_TRINKETICDTRACKER1 = "/tic"
