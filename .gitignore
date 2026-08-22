@@ -1,0 +1,37 @@
+# --- Windows ---
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- macOS ---
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# --- Editors / IDEs ---
+.vscode/*
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Packaging / release artifacts ---
+*.zip
+release/
+dist/
+
+# --- BigWigsMods packager output ---
+*.lua.bak
+DocMap/
+
+# --- Lua tooling ---
+luacheckcache
+.luacheckcache
+*.out
+
+# --- WoW client / local test artifacts ---
+SavedVariables/
+WTF/
+Cache/
